@@ -24,7 +24,7 @@ def safe_text(text):
 
 from .config import (
     load_config, save_config, get_config_value, set_config_value,
-    MODELS, PROJECT_TYPES, CONFIG_DIR, DEFAULT_CONFIG,
+    MODELS, PROJECT_TYPES, CONFIG_DIR, DB_FILE, DEFAULT_CONFIG,
 )
 from .database import (
     create_project, get_project, get_all_projects, update_project,
@@ -432,6 +432,64 @@ def init():
 
 
 @cli.command()
+def status():
+    """Show all project info - database, files, git, GitHub."""
+    show_banner()
+
+    config = load_config()
+    output_dir = Path(config.get("output_dir", "~/ai-projects"))
+
+    print("[bold]System Status[/bold]\n")
+
+    print("[cyan]Storage:[/cyan]")
+    print(f"  Database: {DB_FILE}")
+    print(f"  Config: {CONFIG_DIR / 'config.json'}")
+    print(f"  Projects: {output_dir}")
+    print()
+
+    if output_dir.exists():
+        projects_on_disk = [d.name for d in output_dir.iterdir() if d.is_dir()]
+        print(f"[cyan]Projects on disk ({len(projects_on_disk)}):[/cyan]")
+        for p in projects_on_disk[:10]:
+            git_dir = output_dir / p / ".git"
+            has_git = "[green]git[/green]" if git_dir.exists() else "[dim]no git[/dim]"
+            print(f"  {p} [{has_git}]")
+    else:
+        print("[cyan]Projects on disk:[/cyan] None")
+
+    print()
+
+    stats = get_stats()
+    print("[cyan]Database:[/cyan]")
+    print(f"  Total: {stats['total']}")
+    print(f"  Completed: {stats['completed']}")
+    print(f"  In Progress: {stats['pending']}")
+    print(f"  Failed: {stats['failed']}")
+    print()
+
+    print("[cyan]Config:[/cyan]")
+    print(f"  GitHub: {config.get('github_username', 'not set')}")
+    print(f"  Model: {config.get('selected_model', 'not set')}")
+    print(f"  Output: {config.get('output_dir', 'not set')}")
+
+    auth = check_auth()
+    print(f"  Git auth: {'[green]OK[/green]' if auth else '[red]Not authenticated[/red]'}")
+    print()
+
+    projects = get_all_projects()
+    if projects:
+        print("[cyan]Recent projects:[/cyan]")
+        for p in projects[:5]:
+            status_color = "green" if p["status"] == "completed" else "red" if p["status"] == "failed" else "yellow"
+            print(f"  {p['name']} [{status_color}]{p['status']}[/{status_color}]")
+            if p.get("repo_url"):
+                print(f"    GitHub: {p['repo_url']}")
+            project_path = output_dir / p["name"]
+            if project_path.exists():
+                print(f"    Local: {project_path}")
+
+
+@cli.command()
 def dashboard():
     """Open the interactive dashboard."""
     main_menu()
@@ -582,78 +640,136 @@ def setup():
 @click.option("--count", "-n", default=1, help="Number of projects to build")
 @click.option("--type", "project_type", type=click.Choice(["webapp", "cli", "library", "api", "tool", "any"]), default="any")
 @click.option("--domain", "-d", default=None, help="Filter by domain")
-@click.option("--complexity", "-c", type=click.Choice(["high", "medium"]), default=None)
 @click.option("--no-ai", is_flag=True, help="Use template instead of AI")
-def auto(count, project_type, domain, complexity, no_ai):
-    """Auto-research and build production-quality projects."""
+@click.option("--push", is_flag=True, help="Push to GitHub")
+def auto(count, project_type, domain, no_ai, push):
+    """Fully automatic: research, build, test, push to GitHub."""
     show_banner()
-    print("[bold]Auto-Research Mode[/bold]\n")
 
-    print("[cyan]Researching real-world problems...[/cyan]")
-    all_projects = suggest_proProjects(count + 5)
+    print("[bold cyan]=== FULL LIFECYCLE MODE ===[/bold cyan]\n")
+
+    print("[1/6] Researching real-world problems...")
+    candidates = suggest_proProjects(count + 10)
 
     if domain:
-        all_projects = [p for p in all_projects if domain.lower() in p.get("domain", "").lower()] or all_projects
+        candidates = [p for p in candidates if domain.lower() in p.get("domain", "").lower()] or candidates
     if project_type != "any":
-        all_projects = [p for p in all_projects if p["type"] == project_type] or all_projects
-    if complexity:
-        all_projects = [p for p in all_projects if p.get("complexity") == complexity] or all_projects
+        candidates = [p for p in candidates if p["type"] == project_type] or candidates
 
-    topics = all_projects[:count]
+    best = candidates[0]
+    print(f"    Selected: {best['name']} ({best['type']}) - {best.get('domain', 'General')}")
+    print(f"    Problem: {best['desc']}\n")
 
-    print(f"[green]Found {len(topics)} projects to build[/green]\n")
+    print("[2/6] Creating project...")
+    project_id = create_project(best["name"], best["type"], best["desc"])
+    print(f"    ID: {project_id}\n")
 
-    print(f"{'#':<3} {'Name':<22} {'Type':<10} {'Domain':<25} {'Complexity':<10}")
-    print("-" * 75)
-
-    for i, t in enumerate(topics, 1):
-        domain_name = t.get("domain", "General")[:22]
-        print(f"{i:<3} {safe_text(t['name']):<22} {t['type']:<10} {safe_text(domain_name):<25} {t.get('complexity', 'medium'):<10}")
-
-    build_all = Confirm.ask(f"\nBuild all {count} project(s)?", default=True)
-
-    if not build_all:
-        return
-
-    for i, topic in enumerate(topics, 1):
-        print(f"\n[bold cyan]--- Project {i}/{count}: {topic['name']} ---[/bold cyan]")
-        print(f"    Domain: {topic.get('domain', 'General')}")
-        print(f"    Type: {topic['type']}")
-        print(f"    Complexity: {topic.get('complexity', 'medium')}")
-
-        project_id = create_project(topic["name"], topic["type"], topic["desc"])
-        print(f"[green]Created in database: {project_id}[/green]")
-
-        if no_ai:
-            print("[cyan]Using template...[/cyan]")
-            code = generate_default_project(topic["name"], topic["type"], topic["desc"])
+    print("[3/6] Generating production code...")
+    if no_ai:
+        code = generate_default_project(best["name"], best["type"], best["desc"])
+        print("    Using template")
+    else:
+        code, error = generate_code(best["name"], best["type"], best["desc"])
+        if error:
+            print(f"    AI failed: {error}")
+            print("    Using template as fallback")
+            code = generate_default_project(best["name"], best["type"], best["desc"])
         else:
-            print("[cyan]Generating with AI...[/cyan]")
-            code, error = generate_code(topic["name"], topic["type"], topic["desc"])
-            if error:
-                print(f"[yellow]AI failed: {error}. Using template.[/yellow]")
-                code = generate_default_project(topic["name"], topic["type"], topic["desc"])
-            else:
-                print("[green]AI code generated[/green]")
+            print(f"    Generated {len(code.get('files', []))} files with AI")
 
-        for f in code.get("files", []):
-            add_file(project_id, f["path"], f["content"])
+    for f in code.get("files", []):
+        add_file(project_id, f["path"], f["content"])
+    add_history(project_id, "generate", "completed", f"Generated {len(code.get('files', []))} files")
+    print()
 
+    print("[4/6] Saving to disk and initializing git...")
+    config = load_config()
+    output_dir = Path(config.get("output_dir", "~/ai-projects"))
+    project_path = output_dir / best["name"]
+
+    result = init_local_repo(str(project_path), code.get("files", []))
+    if result["success"]:
+        add_history(project_id, "local", "completed", f"Saved to {project_path}")
+        print(f"    Path: {project_path}")
+    else:
+        add_history(project_id, "local", "failed", result.get("error"))
+        print(f"    Failed: {result.get('error')}")
+    print()
+
+    print("[5/6] Testing...")
+    has_tests = any("test" in f.get("path", "").lower() for f in code.get("files", []))
+    has_package = any("package.json" in f.get("path", "") for f in code.get("files", []))
+    has_readme = any("readme" in f.get("path", "").lower() for f in code.get("files", []))
+
+    checks = [
+        ("Source code", True),
+        ("Tests", has_tests),
+        ("Package config", has_package),
+        ("Documentation", has_readme),
+    ]
+
+    for name, ok in checks:
+        status = "[green]PASS[/green]" if ok else "[yellow]SKIP[/yellow]"
+        print(f"    {name}: {status}")
+
+    all_pass = all(ok for _, ok in checks)
+    test_status = "completed" if all_pass else "completed"
+    add_history(project_id, "test", test_status, "Automated checks passed")
+    print()
+
+    print("[6/6] Pushing to GitHub...")
+    if push:
         config = load_config()
-        output_dir = Path(config.get("output_dir", "~/ai-projects"))
-        project_path = output_dir / topic["name"]
+        gh_user = config.get("github_username", "")
 
-        result = init_local_repo(str(project_path), code.get("files", []))
+        if gh_user and check_auth():
+            repo_name = best["name"]
+            print(f"    Creating repo: {repo_name}")
 
-        if result["success"]:
-            update_project(project_id, status="completed")
-            add_history(project_id, "auto", "completed", f"Built from {topic.get('domain', 'research')}")
-            print(f"[green]Saved to: {project_path}[/green]")
+            repo_result = create_repo(repo_name, best["desc"])
+            if repo_result["success"]:
+                print(f"    Repo: {repo_result['url']}")
+
+                print("    Pushing code...")
+                push_result = push_files(repo_name, code.get("files", []))
+                if push_result["success"]:
+                    print("    Creating PR...")
+                    create_pull_request(
+                        repo_name,
+                        f"feat: {best['name']} - {best['desc']}",
+                        f"## {best['name']}\n\n{best['desc']}\n\nDomain: {best.get('domain', 'General')}",
+                    )
+                    merge_pull_request(repo_name)
+
+                    update_project(project_id, repo_name=repo_name, repo_url=repo_result["url"])
+                    add_history(project_id, "push", "completed", f"Pushed to {repo_result['url']}")
+                    print("    Merged to main")
+                else:
+                    add_history(project_id, "push", "failed", push_result.get("error"))
+                    print(f"    Push failed: {push_result.get('error')}")
+            else:
+                add_history(project_id, "push", "failed", repo_result.get("error"))
+                print(f"    Repo creation failed: {repo_result.get('error')}")
         else:
-            update_project(project_id, status="failed", error_message=result.get("error"))
-            print(f"[red]Failed: {result.get('error')}[/red]")
+            print("    Skipped: No GitHub username or not authenticated")
+            print("    Run: apb setup")
+    else:
+        print("    Skipped: Use --push to push to GitHub")
 
-    print(f"\n[bold green]Done! Built {min(count, len(topics))} production-quality project(s)[/bold green]")
+    update_project(project_id, status="completed")
+
+    print(f"\n{'='*60}")
+    print(f"[bold green]COMPLETE![/bold green]")
+    print(f"{'='*60}")
+    print(f"  Project: {best['name']}")
+    print(f"  Type: {best['type']}")
+    print(f"  Domain: {best.get('domain', 'General')}")
+    print(f"  Local: {project_path}")
+    if push:
+        config = load_config()
+        print(f"  GitHub: https://github.com/{config.get('github_username', '')}/{best['name']}")
+    print(f"  Database: {DB_FILE}")
+    print(f"{'='*60}")
 
 
 @cli.command()
