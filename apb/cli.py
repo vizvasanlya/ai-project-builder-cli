@@ -35,7 +35,7 @@ from .github import (
     check_auth, create_repo, push_files, create_pull_request,
     merge_pull_request, init_local_repo,
 )
-from .research import research_trending, pick_topic, suggest_projects
+from .research import research_deep, pick_smart_project, suggest_proProjects, get_domains, get_projects_by_domain
 
 console = Console()
 
@@ -581,49 +581,60 @@ def setup():
 @cli.command()
 @click.option("--count", "-n", default=1, help="Number of projects to build")
 @click.option("--type", "project_type", type=click.Choice(["webapp", "cli", "library", "api", "tool", "any"]), default="any")
+@click.option("--domain", "-d", default=None, help="Filter by domain")
+@click.option("--complexity", "-c", type=click.Choice(["high", "medium"]), default=None)
 @click.option("--no-ai", is_flag=True, help="Use template instead of AI")
-def auto(count, project_type, no_ai):
-    """Auto-research trending topics and build projects."""
+def auto(count, project_type, domain, complexity, no_ai):
+    """Auto-research and build production-quality projects."""
     show_banner()
-    console.print("[bold]Auto-Research Mode[/bold]\n")
+    print("[bold]Auto-Research Mode[/bold]\n")
 
-    console.print("[cyan]Researching trending topics...[/cyan]")
-    topics = suggest_projects(count + 2)
+    print("[cyan]Researching real-world problems...[/cyan]")
+    all_projects = suggest_proProjects(count + 5)
 
+    if domain:
+        all_projects = [p for p in all_projects if domain.lower() in p.get("domain", "").lower()] or all_projects
     if project_type != "any":
-        topics = [t for t in topics if t["type"] == project_type] or topics
+        all_projects = [p for p in all_projects if p["type"] == project_type] or all_projects
+    if complexity:
+        all_projects = [p for p in all_projects if p.get("complexity") == complexity] or all_projects
 
-    console.print(f"[green]Found {len(topics)} topics[/green]\n")
+    topics = all_projects[:count]
 
-    print(f"{'#':<3} {'Name':<20} {'Type':<10} {'Description':<50}")
-    print("-" * 85)
+    print(f"[green]Found {len(topics)} projects to build[/green]\n")
 
-    for i, t in enumerate(topics[:count], 1):
-        desc = t["desc"][:47] + "..." if len(t["desc"]) > 50 else t["desc"]
-        print(f"{i:<3} {safe_text(t['name']):<20} {t['type']:<10} {safe_text(desc)}")
+    print(f"{'#':<3} {'Name':<22} {'Type':<10} {'Domain':<25} {'Complexity':<10}")
+    print("-" * 75)
+
+    for i, t in enumerate(topics, 1):
+        domain_name = t.get("domain", "General")[:22]
+        print(f"{i:<3} {safe_text(t['name']):<22} {t['type']:<10} {safe_text(domain_name):<25} {t.get('complexity', 'medium'):<10}")
 
     build_all = Confirm.ask(f"\nBuild all {count} project(s)?", default=True)
 
     if not build_all:
         return
 
-    for i, topic in enumerate(topics[:count], 1):
-        console.print(f"\n[bold cyan]--- Project {i}/{count}: {topic['name']} ---[/bold cyan]")
+    for i, topic in enumerate(topics, 1):
+        print(f"\n[bold cyan]--- Project {i}/{count}: {topic['name']} ---[/bold cyan]")
+        print(f"    Domain: {topic.get('domain', 'General')}")
+        print(f"    Type: {topic['type']}")
+        print(f"    Complexity: {topic.get('complexity', 'medium')}")
 
         project_id = create_project(topic["name"], topic["type"], topic["desc"])
-        console.print(f"[green]Created in database: {project_id}[/green]")
+        print(f"[green]Created in database: {project_id}[/green]")
 
         if no_ai:
-            console.print("[cyan]Using template...[/cyan]")
+            print("[cyan]Using template...[/cyan]")
             code = generate_default_project(topic["name"], topic["type"], topic["desc"])
         else:
-            console.print("[cyan]Generating with AI...[/cyan]")
+            print("[cyan]Generating with AI...[/cyan]")
             code, error = generate_code(topic["name"], topic["type"], topic["desc"])
             if error:
-                console.print(f"[yellow]AI failed: {error}. Using template.[/yellow]")
+                print(f"[yellow]AI failed: {error}. Using template.[/yellow]")
                 code = generate_default_project(topic["name"], topic["type"], topic["desc"])
             else:
-                console.print("[green]AI code generated[/green]")
+                print("[green]AI code generated[/green]")
 
         for f in code.get("files", []):
             add_file(project_id, f["path"], f["content"])
@@ -636,33 +647,43 @@ def auto(count, project_type, no_ai):
 
         if result["success"]:
             update_project(project_id, status="completed")
-            add_history(project_id, "auto", "completed", f"Auto-built from {topic.get('source', 'curated')}")
-            console.print(f"[green]Saved to: {project_path}[/green]")
+            add_history(project_id, "auto", "completed", f"Built from {topic.get('domain', 'research')}")
+            print(f"[green]Saved to: {project_path}[/green]")
         else:
             update_project(project_id, status="failed", error_message=result.get("error"))
-            console.print(f"[red]Failed: {result.get('error')}[/red]")
+            print(f"[red]Failed: {result.get('error')}[/red]")
 
-    console.print(f"\n[bold green]Done! Built {min(count, len(topics))} project(s)[/bold green]")
+    print(f"\n[bold green]Done! Built {min(count, len(topics))} production-quality project(s)[/bold green]")
 
 
 @cli.command()
-def suggest():
-    """Suggest trending projects to build."""
+@click.option("--domain", "-d", default=None, help="Filter by domain (e.g. 'Security', 'DevOps')")
+@click.option("--complexity", "-c", type=click.Choice(["high", "medium"]), default=None)
+def suggest(domain, complexity):
+    """Suggest real production-quality projects to build."""
     show_banner()
-    print("[bold]Trending Project Ideas[/bold]\n")
+    print("[bold]Production-Quality Project Ideas[/bold]\n")
 
-    topics = suggest_projects(8)
+    topics = suggest_proProjects(10)
 
-    print(f"{'#':<3} {'Name':<20} {'Type':<10} {'Description':<50}")
-    print("-" * 85)
+    if domain:
+        topics = [t for t in topics if domain.lower() in t.get("domain", "").lower()] or topics
+    if complexity:
+        topics = [t for t in topics if t.get("complexity") == complexity] or topics
+
+    print(f"{'#':<3} {'Name':<22} {'Type':<10} {'Complexity':<12} {'Description':<50}")
+    print("-" * 100)
 
     for i, t in enumerate(topics, 1):
         desc = t["desc"][:47] + "..." if len(t["desc"]) > 50 else t["desc"]
-        print(f"{i:<3} {safe_text(t['name']):<20} {t['type']:<10} {safe_text(desc)}")
+        complexity_tag = t.get("complexity", "medium")
+        print(f"{i:<3} {safe_text(t['name']):<22} {t['type']:<10} {complexity_tag:<12} {safe_text(desc)}")
 
-    print("\n[bold]To build one:[/bold]")
+    print(f"\n[bold]Domains:[/bold] {', '.join(get_domains())}")
+    print("\n[bold]To build:[/bold]")
     print("  apb create --name <name> --type <type> --desc \"<desc>\"")
     print("  apb auto -n 3")
+    print("  apb auto -d Security -n 2")
 
 
 if __name__ == "__main__":
