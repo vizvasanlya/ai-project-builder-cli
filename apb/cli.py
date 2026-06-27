@@ -6,16 +6,16 @@ import click
 from pathlib import Path
 from datetime import datetime
 
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.prompt import Prompt, Confirm
-from rich.syntax import Syntax
-from rich.layout import Layout
-from rich.text import Text
-from rich.columns import Columns
 from rich import box
+
+console = Console(force_terminal=True)
 
 from .config import (
     load_config, save_config, get_config_value, set_config_value,
@@ -183,50 +183,41 @@ def interactive_create():
 
     use_ai = Confirm.ask("Generate code with AI?", default=True)
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Creating project...", total=None)
+    console.print("[cyan]Creating project...[/cyan]")
+    project_id = create_project(name, project_type, description)
+    console.print("[green]Project created in database[/green]")
 
-        project_id = create_project(name, project_type, description)
-        progress.update(task, description="Project created in database")
-
-        if use_ai:
-            progress.update(task, description="Generating code with AI...")
-            code, error = generate_code(name, project_type, description)
-
-            if error:
-                progress.update(task, description=f"AI failed: {error}. Using template.")
-                code = generate_default_project(name, project_type, description)
-            else:
-                progress.update(task, description="AI code generated successfully")
-        else:
-            progress.update(task, description="Using template code...")
+    if use_ai:
+        console.print("[cyan]Generating code with AI...[/cyan]")
+        code, error = generate_code(name, project_type, description)
+        if error:
+            console.print(f"[yellow]AI failed: {error}. Using template.[/yellow]")
             code = generate_default_project(name, project_type, description)
-
-        progress.update(task, description="Saving files to database...")
-        for f in code.get("files", []):
-            add_file(project_id, f["path"], f["content"])
-
-        add_history(project_id, "generate", "completed", f"Generated {len(code.get('files', []))} files")
-
-        config = load_config()
-        output_dir = Path(config.get("output_dir", "~/ai-projects"))
-        project_path = output_dir / name
-
-        progress.update(task, description="Writing files to disk...")
-        result = init_local_repo(str(project_path), code.get("files", []))
-
-        if result["success"]:
-            add_history(project_id, "local", "completed", f"Created at {project_path}")
-            update_project(project_id, status="completed")
-            progress.update(task, description="Project complete!")
         else:
-            add_history(project_id, "local", "failed", result.get("error", "Unknown error"))
-            update_project(project_id, status="failed", error_message=result.get("error"))
-            progress.update(task, description=f"Failed: {result.get('error')}")
+            console.print("[green]AI code generated successfully[/green]")
+    else:
+        console.print("[cyan]Using template code...[/cyan]")
+        code = generate_default_project(name, project_type, description)
+
+    console.print("[cyan]Saving files to database...[/cyan]")
+    for f in code.get("files", []):
+        add_file(project_id, f["path"], f["content"])
+
+    add_history(project_id, "generate", "completed", f"Generated {len(code.get('files', []))} files")
+
+    config = load_config()
+    output_dir = Path(config.get("output_dir", "~/ai-projects"))
+    project_path = output_dir / name
+
+    console.print("[cyan]Writing files to disk...[/cyan]")
+    result = init_local_repo(str(project_path), code.get("files", []))
+
+    if result["success"]:
+        add_history(project_id, "local", "completed", f"Created at {project_path}")
+        update_project(project_id, status="completed")
+    else:
+        add_history(project_id, "local", "failed", result.get("error", "Unknown error"))
+        update_project(project_id, status="failed", error_message=result.get("error"))
 
     console.print(f"\n[green]Project created at: {project_path}[/green]")
     show_project_detail(project_id)
@@ -315,10 +306,8 @@ def interactive_models():
     if choice == "t":
         idx = int(Prompt.ask("Model number to test", default="1")) - 1
         if 0 <= idx < len(models):
-            with Progress(SpinnerColumn(), TextColumn("{task.description}"), console=console) as progress:
-                task = progress.add_task(f"Testing {models[idx]['name']}...", total=None)
-                result = test_model(models[idx]["id"])
-                progress.update(task, description="Done")
+            console.print(f"[cyan]Testing {models[idx]['name']}...[/cyan]")
+            result = test_model(models[idx]["id"])
 
             if result["success"]:
                 console.print(Panel(
@@ -451,36 +440,40 @@ def create(name, project_type, desc, no_ai):
     """Create a new project."""
     show_banner()
 
-    with Progress(SpinnerColumn(), TextColumn("{task.description}"), console=console) as progress:
-        task = progress.add_task("Creating project...", total=None)
+    console.print("[cyan]Creating project...[/cyan]")
+    project_id = create_project(name, project_type, desc)
+    console.print(f"[green]Project created in database: {project_id}[/green]")
 
-        project_id = create_project(name, project_type, desc)
-
-        if no_ai:
+    if no_ai:
+        console.print("[cyan]Using template code...[/cyan]")
+        code = generate_default_project(name, project_type, desc)
+    else:
+        console.print("[cyan]Generating with AI...[/cyan]")
+        code, error = generate_code(name, project_type, desc)
+        if error:
+            console.print(f"[yellow]AI failed: {error}. Using template.[/yellow]")
             code = generate_default_project(name, project_type, desc)
         else:
-            progress.update(task, description="Generating with AI...")
-            code, error = generate_code(name, project_type, desc)
-            if error:
-                progress.update(task, description=f"AI failed: {error}. Using template.")
-                code = generate_default_project(name, project_type, desc)
+            console.print("[green]AI code generated successfully[/green]")
 
-        for f in code.get("files", []):
-            add_file(project_id, f["path"], f["content"])
+    console.print("[cyan]Saving files to database...[/cyan]")
+    for f in code.get("files", []):
+        add_file(project_id, f["path"], f["content"])
 
-        config = load_config()
-        output_dir = Path(config.get("output_dir", "~/ai-projects"))
-        project_path = output_dir / name
+    config = load_config()
+    output_dir = Path(config.get("output_dir", "~/ai-projects"))
+    project_path = output_dir / name
 
-        result = init_local_repo(str(project_path), code.get("files", []))
+    console.print("[cyan]Writing files to disk...[/cyan]")
+    result = init_local_repo(str(project_path), code.get("files", []))
 
-        if result["success"]:
-            update_project(project_id, status="completed")
-            add_history(project_id, "local", "completed", f"Created at {project_path}")
-            console.print(f"\n[green]Project created at: {project_path}[/green]")
-        else:
-            update_project(project_id, status="failed", error_message=result.get("error"))
-            console.print(f"\n[red]Failed: {result.get('error')}[/red]")
+    if result["success"]:
+        update_project(project_id, status="completed")
+        add_history(project_id, "local", "completed", f"Created at {project_path}")
+        console.print(f"\n[green]Project created at: {project_path}[/green]")
+    else:
+        update_project(project_id, status="failed", error_message=result.get("error"))
+        console.print(f"\n[red]Failed: {result.get('error')}[/red]")
 
     show_project_detail(project_id)
 
