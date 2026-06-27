@@ -11,11 +11,16 @@ os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
-from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.prompt import Prompt, Confirm
 from rich import box
 
 console = Console(force_terminal=True)
+
+
+def safe_text(text):
+    if not text:
+        return ""
+    return text.encode("ascii", errors="replace").decode("ascii")
 
 from .config import (
     load_config, save_config, get_config_value, set_config_value,
@@ -30,6 +35,7 @@ from .github import (
     check_auth, create_repo, push_files, create_pull_request,
     merge_pull_request, init_local_repo,
 )
+from .research import research_trending, pick_topic, suggest_projects
 
 console = Console()
 
@@ -570,6 +576,93 @@ def setup():
 
     save_config(config)
     console.print("\n[green]Configuration saved![/green]")
+
+
+@cli.command()
+@click.option("--count", "-n", default=1, help="Number of projects to build")
+@click.option("--type", "project_type", type=click.Choice(["webapp", "cli", "library", "api", "tool", "any"]), default="any")
+@click.option("--no-ai", is_flag=True, help="Use template instead of AI")
+def auto(count, project_type, no_ai):
+    """Auto-research trending topics and build projects."""
+    show_banner()
+    console.print("[bold]Auto-Research Mode[/bold]\n")
+
+    console.print("[cyan]Researching trending topics...[/cyan]")
+    topics = suggest_projects(count + 2)
+
+    if project_type != "any":
+        topics = [t for t in topics if t["type"] == project_type] or topics
+
+    console.print(f"[green]Found {len(topics)} topics[/green]\n")
+
+    print(f"{'#':<3} {'Name':<20} {'Type':<10} {'Description':<50}")
+    print("-" * 85)
+
+    for i, t in enumerate(topics[:count], 1):
+        desc = t["desc"][:47] + "..." if len(t["desc"]) > 50 else t["desc"]
+        print(f"{i:<3} {safe_text(t['name']):<20} {t['type']:<10} {safe_text(desc)}")
+
+    build_all = Confirm.ask(f"\nBuild all {count} project(s)?", default=True)
+
+    if not build_all:
+        return
+
+    for i, topic in enumerate(topics[:count], 1):
+        console.print(f"\n[bold cyan]--- Project {i}/{count}: {topic['name']} ---[/bold cyan]")
+
+        project_id = create_project(topic["name"], topic["type"], topic["desc"])
+        console.print(f"[green]Created in database: {project_id}[/green]")
+
+        if no_ai:
+            console.print("[cyan]Using template...[/cyan]")
+            code = generate_default_project(topic["name"], topic["type"], topic["desc"])
+        else:
+            console.print("[cyan]Generating with AI...[/cyan]")
+            code, error = generate_code(topic["name"], topic["type"], topic["desc"])
+            if error:
+                console.print(f"[yellow]AI failed: {error}. Using template.[/yellow]")
+                code = generate_default_project(topic["name"], topic["type"], topic["desc"])
+            else:
+                console.print("[green]AI code generated[/green]")
+
+        for f in code.get("files", []):
+            add_file(project_id, f["path"], f["content"])
+
+        config = load_config()
+        output_dir = Path(config.get("output_dir", "~/ai-projects"))
+        project_path = output_dir / topic["name"]
+
+        result = init_local_repo(str(project_path), code.get("files", []))
+
+        if result["success"]:
+            update_project(project_id, status="completed")
+            add_history(project_id, "auto", "completed", f"Auto-built from {topic.get('source', 'curated')}")
+            console.print(f"[green]Saved to: {project_path}[/green]")
+        else:
+            update_project(project_id, status="failed", error_message=result.get("error"))
+            console.print(f"[red]Failed: {result.get('error')}[/red]")
+
+    console.print(f"\n[bold green]Done! Built {min(count, len(topics))} project(s)[/bold green]")
+
+
+@cli.command()
+def suggest():
+    """Suggest trending projects to build."""
+    show_banner()
+    print("[bold]Trending Project Ideas[/bold]\n")
+
+    topics = suggest_projects(8)
+
+    print(f"{'#':<3} {'Name':<20} {'Type':<10} {'Description':<50}")
+    print("-" * 85)
+
+    for i, t in enumerate(topics, 1):
+        desc = t["desc"][:47] + "..." if len(t["desc"]) > 50 else t["desc"]
+        print(f"{i:<3} {safe_text(t['name']):<20} {t['type']:<10} {safe_text(desc)}")
+
+    print("\n[bold]To build one:[/bold]")
+    print("  apb create --name <name> --type <type> --desc \"<desc>\"")
+    print("  apb auto -n 3")
 
 
 if __name__ == "__main__":
